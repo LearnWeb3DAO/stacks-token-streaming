@@ -40,6 +40,12 @@
     })
     (current-stream-id (var-get latest-stream-id))
   )
+    ;; stx-transfer takes in (amount, sender, recipient) arguments
+    ;; for the `recipient` - we do `(as-contract tx-sender)`
+    ;; `as-contract` switches the `tx-sender` variable to be the contract principal
+    ;; inside it's scope
+    ;; so doing `as-contract tx-sender` gives us the contract address itself
+    ;; this is like doing address(this) in Solidity
     (try! (stx-transfer? initial-balance contract-caller (as-contract tx-sender)))
     (map-set streams current-stream-id stream)
     (var-set latest-stream-id (+ current-stream-id u1))
