@@ -2,6 +2,7 @@
 (define-constant ERR_UNAUTHORIZED (err u0))
 (define-constant ERR_INVALID_SIGNATURE (err u1))
 (define-constant ERR_STREAM_STILL_ACTIVE (err u2))
+(define-constant ERR_INVALID_STREAM_ID (err u4))
 
 ;; data vars
 (define-data-var latest-stream-id uint u0)
@@ -30,7 +31,7 @@
   )
   (let (
     (stream {
-      sender: tx-sender,
+      sender: contract-caller,
       recipient: recipient,
       balance: initial-balance,
       withdrawn-balance: u0,
@@ -39,12 +40,10 @@
     })
     (current-stream-id (var-get latest-stream-id))
   )
-    (begin
-      (try! (stx-transfer? initial-balance tx-sender (as-contract tx-sender)))
-      (map-set streams current-stream-id stream)
-      (var-set latest-stream-id (+ current-stream-id u1))
-      (ok current-stream-id)
-    )
+    (try! (stx-transfer? initial-balance contract-caller (as-contract tx-sender)))
+    (map-set streams current-stream-id stream)
+    (var-set latest-stream-id (+ current-stream-id u1))
+    (ok current-stream-id)
   )
 )
 
@@ -55,24 +54,14 @@
     (amount uint)
   )
   (let (
-    (stream (unwrap-panic (map-get? streams stream-id)))
+    (stream (unwrap! (map-get? streams stream-id) ERR_INVALID_STREAM_ID))
   )
-  (begin
-    (asserts! (is-eq tx-sender (get sender stream)) ERR_UNAUTHORIZED)
-    (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
-    (map-set streams
-      stream-id
-      {
-        sender: (get sender stream),
-        recipient: (get recipient stream),
-        balance: (+ (get balance stream) amount),
-        withdrawn-balance: (get withdrawn-balance stream),
-        payment-per-block: (get payment-per-block stream),
-        timeframe: (get timeframe stream)
-      }
-    )
-    (ok amount)
-    )
+  (asserts! (is-eq contract-caller (get sender stream)) ERR_UNAUTHORIZED)
+  (try! (stx-transfer? amount contract-caller (as-contract tx-sender)))
+  (map-set streams stream-id 
+    (merge stream {balance: (+ (get balance stream) amount)})
+  )
+  (ok amount)
   )
 )
 
@@ -82,7 +71,7 @@
     (who principal)
   )
   (let (
-    (stream (unwrap-panic (map-get? streams stream-id)))
+    (stream (unwrap! (map-get? streams stream-id) u0))
     (block-delta (calculate-block-delta (get timeframe stream)))
     (recipient-balance (* block-delta (get payment-per-block stream)))
   )
@@ -127,25 +116,15 @@
     (stream-id uint)
   )
   (let (
-    (stream (unwrap-panic (map-get? streams stream-id)))
-    (balance (balance-of stream-id tx-sender))
+    (stream (unwrap! (map-get? streams stream-id) ERR_INVALID_STREAM_ID))
+    (balance (balance-of stream-id contract-caller))
   )
-  (begin
-      (asserts! (is-eq tx-sender (get recipient stream)) ERR_UNAUTHORIZED)
-      (map-set streams
-        stream-id
-        {
-          sender: (get sender stream),
-          recipient: (get recipient stream),
-          balance: (get balance stream),
-          withdrawn-balance: (+ (get withdrawn-balance stream) balance),
-          payment-per-block: (get payment-per-block stream),
-          timeframe: (get timeframe stream)
-        }
-      )
-      (try! (as-contract (stx-transfer? balance tx-sender (get recipient stream))))
-      (ok balance)
+    (asserts! (is-eq contract-caller (get recipient stream)) ERR_UNAUTHORIZED)
+    (map-set streams stream-id 
+      (merge stream {withdrawn-balance: (+ (get withdrawn-balance stream) balance)})
     )
+    (try! (as-contract (stx-transfer? balance tx-sender (get recipient stream))))
+    (ok balance)
   )
 )
 
@@ -154,26 +133,17 @@
     (stream-id uint)
   )
   (let (
-    (stream (unwrap-panic (map-get? streams stream-id)))
+    (stream (unwrap! (map-get? streams stream-id) ERR_INVALID_STREAM_ID))
     (balance (balance-of stream-id (get sender stream)))
   )
-  (begin
-      (asserts! (is-eq tx-sender (get sender stream)) ERR_UNAUTHORIZED)
-      (asserts! (< (get stop-block (get timeframe stream)) block-height) ERR_STREAM_STILL_ACTIVE)
-      (map-set streams
-        stream-id
-        {
-          sender: (get sender stream),
-          recipient: (get recipient stream),
-          balance: (- (get balance stream) balance),
-          withdrawn-balance: (get withdrawn-balance stream),
-          payment-per-block: (get payment-per-block stream),
-          timeframe: (get timeframe stream)
-        }
-      )
-      (try! (as-contract (stx-transfer? balance tx-sender (get sender stream))))
-      (ok balance)
-    )
+    (asserts! (is-eq contract-caller (get sender stream)) ERR_UNAUTHORIZED)
+    (asserts! (< (get stop-block (get timeframe stream)) block-height) ERR_STREAM_STILL_ACTIVE)
+    (map-set streams stream-id (merge stream {
+        balance: (- (get balance stream) balance),
+      }
+    ))
+    (try! (as-contract (stx-transfer? balance tx-sender (get sender stream))))
+    (ok balance)
   )
 )
 
@@ -184,7 +154,7 @@
     (new-timeframe (tuple (start-block uint) (stop-block uint)))
   )
   (let (
-    (stream (unwrap-panic (map-get? streams stream-id)))
+    (stream (unwrap! (map-get? streams stream-id) (sha256 0)))
     (msg (concat (concat (unwrap-panic (to-consensus-buff? stream)) (unwrap-panic (to-consensus-buff? new-payment-per-block))) (unwrap-panic (to-consensus-buff? new-timeframe))))
   )
     (sha256 msg)
@@ -208,29 +178,20 @@
     (signature (buff 65))
   )
   (let (
-    (stream (unwrap-panic (map-get? streams stream-id)))    
+    (stream (unwrap! (map-get? streams stream-id) ERR_INVALID_STREAM_ID))  
   )
-    (begin
-      (asserts! (validate-signature (hash-stream stream-id payment-per-block timeframe) signature signer) ERR_INVALID_SIGNATURE)
-      (asserts!
-        (or
-          (and (is-eq (get sender stream) tx-sender) (is-eq (get recipient stream) signer))
-          (and (is-eq (get sender stream) signer) (is-eq (get recipient stream) tx-sender))
-        )
-        ERR_UNAUTHORIZED
+    (asserts! (validate-signature (hash-stream stream-id payment-per-block timeframe) signature signer) ERR_INVALID_SIGNATURE)
+    (asserts!
+      (or
+        (and (is-eq (get sender stream) contract-caller) (is-eq (get recipient stream) signer))
+        (and (is-eq (get sender stream) signer) (is-eq (get recipient stream) contract-caller))
       )
-      (map-set streams
-        stream-id
-        {
-          sender: (get sender stream),
-          recipient: (get recipient stream),
-          balance: (get balance stream),
-          withdrawn-balance: (get withdrawn-balance stream),
-          payment-per-block: payment-per-block,
-          timeframe: timeframe
-        }
-      )
-      (ok true)
+      ERR_UNAUTHORIZED
     )
+    (map-set streams stream-id (merge stream {
+        payment-per-block: payment-per-block,
+        timeframe: timeframe
+    }))
+    (ok true)
   )
 )
